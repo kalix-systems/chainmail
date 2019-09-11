@@ -18,11 +18,8 @@ pub type MessageKey = aead::Key;
 pub const NONCE_BYTES: usize = aead::NONCEBYTES;
 pub type Nonce = aead::Nonce;
 
-// TODO: consider if block depth does anything useful
-// commenting it out for now
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Block {
-    // depth: u64,
     parent_hashes: BTreeSet<BlockHash>,
     sig: sign::Signature,
     #[serde(with = "serde_bytes")]
@@ -125,6 +122,11 @@ pub trait BlockStore {
     fn mark_used(&mut self, hash: BlockHash);
     // note: this would return a map but we'll always immediately split it anyway
     fn get_key(&self, hash: BlockHash) -> Option<ChainKey>;
+
+    fn get_keys<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I) -> Option<Vec<ChainKey>> {
+        blocks.map(|h| self.get_key(*h)).collect()
+    }
+
     fn get_unused(&self) -> (BTreeMap<BlockHash, ChainKey>);
 }
 
@@ -176,10 +178,6 @@ pub trait BlockStoreExt: BlockStore {
         self.store_key(hash, c);
 
         Ok(block)
-    }
-
-    fn get_keys<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I) -> Option<Vec<ChainKey>> {
-        blocks.map(|h| self.get_key(*h)).collect()
     }
 }
 
