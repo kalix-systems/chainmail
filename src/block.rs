@@ -18,8 +18,9 @@ pub type MessageKey = aead::Key;
 pub const NONCE_BYTES: usize = aead::NONCEBYTES;
 pub type Nonce = aead::Nonce;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Block {
+    depth: u64,
     parents: BTreeSet<BlockHash>,
     sig: sign::Signature,
     #[serde(with = "serde_bytes")]
@@ -37,19 +38,25 @@ impl Block {
         let digest = state.finalize().ok()?;
         BlockHash::from_slice(digest.as_ref())
     }
-}
 
-fn compute_block_ad<'a, I: Iterator<Item = &'a BlockHash>>(
-    parents: I,
-    sig: &sign::Signature,
-) -> Vec<u8> {
-    let capacity = parents.size_hint().0 * BLOCKHASH_BYTES + sign::SIGNATUREBYTES;
-    let mut ad = Vec::with_capacity(capacity);
-    for parent in parents {
-        ad.extend_from_slice(parent.as_ref());
+    pub fn check_sig(&self, key: &sign::PublicKey) -> bool {
+        let capacity = self.parents.len() * BLOCKHASH_BYTES;
+        let mut data = Vec::with_capacity(capacity);
+        for parent in self.parents.iter() {
+            data.extend_from_slice(parent.as_ref())
+        }
+        sign::verify_detached(&self.sig, &data, key)
     }
-    ad.extend_from_slice(sig.as_ref());
-    ad
+
+    fn compute_ad(&self) -> Vec<u8> {
+        let capacity = self.parents.len() * BLOCKHASH_BYTES + sign::SIGNATUREBYTES;
+        let mut ad = Vec::with_capacity(capacity);
+        for parent in self.parents.iter() {
+            ad.extend_from_slice(parent.as_ref());
+        }
+        ad.extend_from_slice(self.sig.as_ref());
+        ad
+    }
 }
 
 fn hash_inputs_with_salt<'a, I, D, S>(len: usize, data: I, salt: &S) -> Result<hash::Digest, ()>
@@ -100,22 +107,56 @@ fn kdf(keys: &Vec<ChainKey>, salt: &mut Vec<u8>) -> Option<(ChainKey, MessageKey
 
 pub trait BlockStore {
     fn has_block(&self, hash: BlockHash) -> bool;
-    fn get_block(&self, hash: BlockHash) -> Option<Block>;
-    fn store_block(&mut self, hash: BlockHash, block: Block) -> bool;
+    fn store_block(&mut self, hash: BlockHash, block: Block);
+    fn store_key(&mut self, hash: BlockHash, key: ChainKey);
+    /// `self.get_blocks(hashes)` should return `None` if any of the blocks
+    /// could not be found, and if it does return `Some(v)`, `v` should be in
+    /// the same order as `hashes`.
+    fn get_blocks(&self, hashes: Vec<BlockHash>) -> Option<Vec<Block>>;
+    /// `self.get_keys(hashes)` should return `None` if any of the blocks
+    /// could not be found, and if it does return `Some(v)`, `v` should be in
+    /// the same order as `hashes`.
     fn get_keys(&self, hashes: Vec<BlockHash>) -> Option<Vec<ChainKey>>;
-    fn store_key(&mut self, hash: BlockHash, key: ChainKey) -> bool;
 }
 
 pub trait BlockStoreExt: BlockStore {
-    fn open_block(&mut self, block: &Block) -> Result<Vec<u8>, Error> {
-        let parents: Vec<BlockHash> = block.parents.iter().map(|x| *x).collect();
-        let ad = compute_block_ad(parents.iter(), &block.sig);
-        let keys = self.get_keys(parents).ok_or(MissingKeys)?;
+    fn open_block(&mut self, pubkey: &sign::PublicKey, block: Block) -> Result<Vec<u8>, Error> {
+        if !block.check_sig(pubkey) {
+            return Err(BadSig);
+        }
+
+        let parent_hashes: Vec<BlockHash> = block.parents.iter().map(|x| *x).collect();
+        let parent_blocks = self.get_blocks(parent_hashes.clone()).ok_or(MissingKeys)?;
+        let depth: u64 = parent_blocks.iter().map(|b| b.depth).sum();
+        if block.depth != depth + 1 {
+            return Err(BadBlockDepth);
+        }
+        let parent_keys = self.get_keys(parent_hashes).ok_or(MissingKeys)?;
+
+        // TODO: consider stack allocation here
         let mut salt = Vec::with_capacity(sign::SIGNATUREBYTES + 1);
         salt.extend_from_slice(block.sig.as_ref());
-        let (chainkey, msgkey, nonce) = kdf(&keys, &mut salt).ok_or(KdfError)?;
+        let (chainkey, msgkey, nonce) = kdf(&parent_keys, &mut salt).ok_or(KdfError)?;
+
+        let ad = block.compute_ad();
         let res =
             aead::open(&block.msg, Some(&ad), &nonce, &msgkey).map_err(|_| DecryptionError)?;
+
+        let hash = block.compute_hash().ok_or(HashingError)?;
+        self.store_block(hash, block);
+        self.store_key(hash, chainkey);
+
+        Ok(res)
+    }
+
+    fn seal_block(
+        &mut self,
+        parents: Vec<Block>,
+        seckey: &sign::SecretKey,
+        msg: &[u8],
+    ) -> Result<Block, Error> {
         unimplemented!()
     }
 }
+
+impl<T: BlockStore> BlockStoreExt for T {}
