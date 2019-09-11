@@ -1,5 +1,5 @@
 use crate::prelude::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const BLOCKHASH_BYTES: usize = 32;
 new_type! { /// The hash of a `Block`
@@ -18,19 +18,40 @@ pub type MessageKey = aead::Key;
 pub const NONCE_BYTES: usize = aead::NONCEBYTES;
 pub type Nonce = aead::Nonce;
 
+// TODO: consider if block depth does anything useful
+// commenting it out for now
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Block {
-    depth: u64,
-    parents: BTreeSet<BlockHash>,
+    // depth: u64,
+    parent_hashes: BTreeSet<BlockHash>,
     sig: sign::Signature,
     #[serde(with = "serde_bytes")]
     msg: Vec<u8>,
 }
 
+fn compute_block_signing_data(parents: &BTreeSet<BlockHash>) -> Vec<u8> {
+    let capacity = parents.len() * BLOCKHASH_BYTES;
+    let mut data = Vec::with_capacity(capacity);
+    for parent in parents.iter() {
+        data.extend_from_slice(parent.as_ref())
+    }
+    data
+}
+
+fn compute_block_ad(parents: &BTreeSet<BlockHash>, sig: &sign::Signature) -> Vec<u8> {
+    let capacity = parents.len() * BLOCKHASH_BYTES + sign::SIGNATUREBYTES;
+    let mut ad = Vec::with_capacity(capacity);
+    for parent in parents.iter() {
+        ad.extend_from_slice(parent.as_ref());
+    }
+    ad.extend_from_slice(sig.as_ref());
+    ad
+}
+
 impl Block {
     pub fn compute_hash(&self) -> Option<BlockHash> {
         let mut state = hash::State::new(BLOCKHASH_BYTES, None).ok()?;
-        for parent in self.parents.iter() {
+        for parent in self.parent_hashes.iter() {
             state.update(parent.as_ref()).ok()?;
         }
         state.update(self.sig.as_ref()).ok()?;
@@ -40,22 +61,11 @@ impl Block {
     }
 
     pub fn check_sig(&self, key: &sign::PublicKey) -> bool {
-        let capacity = self.parents.len() * BLOCKHASH_BYTES;
-        let mut data = Vec::with_capacity(capacity);
-        for parent in self.parents.iter() {
-            data.extend_from_slice(parent.as_ref())
-        }
-        sign::verify_detached(&self.sig, &data, key)
-    }
-
-    fn compute_ad(&self) -> Vec<u8> {
-        let capacity = self.parents.len() * BLOCKHASH_BYTES + sign::SIGNATUREBYTES;
-        let mut ad = Vec::with_capacity(capacity);
-        for parent in self.parents.iter() {
-            ad.extend_from_slice(parent.as_ref());
-        }
-        ad.extend_from_slice(self.sig.as_ref());
-        ad
+        sign::verify_detached(
+            &self.sig,
+            &compute_block_signing_data(&self.parent_hashes),
+            key,
+        )
     }
 }
 
@@ -80,7 +90,10 @@ where
     state.finalize()
 }
 
-fn kdf(keys: &Vec<ChainKey>, salt: &mut Vec<u8>) -> Option<(ChainKey, MessageKey, Nonce)> {
+fn kdf(keys: &Vec<ChainKey>, sig: &sign::Signature) -> Option<(ChainKey, MessageKey, Nonce)> {
+    let mut salt = Vec::with_capacity(sign::SIGNATUREBYTES + 1);
+    salt.extend_from_slice(sig.as_ref());
+
     let chainkey_bytes = {
         salt.push(0);
         let res = hash_inputs_with_salt(CHAINKEY_BYTES, keys.iter(), &salt).ok()?;
@@ -106,17 +119,13 @@ fn kdf(keys: &Vec<ChainKey>, salt: &mut Vec<u8>) -> Option<(ChainKey, MessageKey
 }
 
 pub trait BlockStore {
-    fn has_block(&self, hash: BlockHash) -> bool;
-    fn store_block(&mut self, hash: BlockHash, block: Block);
     fn store_key(&mut self, hash: BlockHash, key: ChainKey);
-    /// `self.get_blocks(hashes)` should return `None` if any of the blocks
-    /// could not be found, and if it does return `Some(v)`, `v` should be in
-    /// the same order as `hashes`.
-    fn get_blocks(&self, hashes: Vec<BlockHash>) -> Option<Vec<Block>>;
-    /// `self.get_keys(hashes)` should return `None` if any of the blocks
-    /// could not be found, and if it does return `Some(v)`, `v` should be in
-    /// the same order as `hashes`.
-    fn get_keys(&self, hashes: Vec<BlockHash>) -> Option<Vec<ChainKey>>;
+    // we'll want to implement some kind of gc strategy to delete old, used keys
+    // maybe run it hourly, or more often if there's lots of activity
+    fn mark_used(&mut self, hash: BlockHash);
+    // note: this would return a map but we'll always immediately split it anyway
+    fn get_key(&self, hash: BlockHash) -> Option<ChainKey>;
+    fn get_unused(&self) -> (BTreeMap<BlockHash, ChainKey>);
 }
 
 pub trait BlockStoreExt: BlockStore {
@@ -125,37 +134,52 @@ pub trait BlockStoreExt: BlockStore {
             return Err(BadSig);
         }
 
-        let parent_hashes: Vec<BlockHash> = block.parents.iter().map(|x| *x).collect();
-        let parent_blocks = self.get_blocks(parent_hashes.clone()).ok_or(MissingKeys)?;
-        let depth: u64 = parent_blocks.iter().map(|b| b.depth).sum();
-        if block.depth != depth + 1 {
-            return Err(BadBlockDepth);
-        }
-        let parent_keys = self.get_keys(parent_hashes).ok_or(MissingKeys)?;
+        let keys = self
+            .get_keys(block.parent_hashes.iter())
+            .ok_or(MissingKeys)?;
 
-        // TODO: consider stack allocation here
-        let mut salt = Vec::with_capacity(sign::SIGNATUREBYTES + 1);
-        salt.extend_from_slice(block.sig.as_ref());
-        let (chainkey, msgkey, nonce) = kdf(&parent_keys, &mut salt).ok_or(KdfError)?;
+        let (chainkey, msgkey, nonce) = kdf(&keys, &block.sig).ok_or(KdfError)?;
 
-        let ad = block.compute_ad();
+        let ad = compute_block_ad(&block.parent_hashes, &block.sig);
+
         let res =
             aead::open(&block.msg, Some(&ad), &nonce, &msgkey).map_err(|_| DecryptionError)?;
 
         let hash = block.compute_hash().ok_or(HashingError)?;
-        self.store_block(hash, block);
+
         self.store_key(hash, chainkey);
+        for hash in block.parent_hashes.iter() {
+            self.mark_used(*hash)
+        }
 
         Ok(res)
     }
 
-    fn seal_block(
-        &mut self,
-        parents: Vec<Block>,
-        seckey: &sign::SecretKey,
-        msg: &[u8],
-    ) -> Result<Block, Error> {
-        unimplemented!()
+    fn seal_block(&mut self, seckey: &sign::SecretKey, msg: &[u8]) -> Result<Block, Error> {
+        let hashkeys = self.get_unused();
+        let (parent_hashes, keys): (BTreeSet<BlockHash>, Vec<ChainKey>) =
+            hashkeys.into_iter().unzip();
+
+        let dat = compute_block_signing_data(&parent_hashes);
+        let sig = sign::sign_detached(&dat, seckey);
+
+        let (c, k, n) = kdf(&keys, &sig).ok_or(KdfError)?;
+        let ad = compute_block_ad(&parent_hashes, &sig);
+        let msg = aead::seal(msg, Some(&ad), &n, &k);
+        let block = Block {
+            parent_hashes,
+            sig,
+            msg,
+        };
+
+        let hash = block.compute_hash().ok_or(HashingError)?;
+        self.store_key(hash, c);
+
+        Ok(block)
+    }
+
+    fn get_keys<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I) -> Option<Vec<ChainKey>> {
+        blocks.map(|h| self.get_key(*h)).collect()
     }
 }
 
