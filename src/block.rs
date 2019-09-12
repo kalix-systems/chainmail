@@ -49,14 +49,6 @@ impl Block {
         let digest = state.finalize().ok()?;
         BlockHash::from_slice(digest.as_ref())
     }
-
-    pub fn check_sig(&self, key: &sign::PublicKey) -> bool {
-        sign::verify_detached(
-            &self.sig,
-            &compute_block_signing_data(&self.parent_hashes),
-            key,
-        )
-    }
 }
 
 pub trait BlockStore {
@@ -64,7 +56,10 @@ pub trait BlockStore {
     // we'll want to implement some kind of gc strategy to delete old, used keys
     // maybe run it hourly, or more often if there's lots of activity
     fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I);
-    fn get_keys<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I) -> Option<Vec<ChainKey>>;
+    fn get_keys<'a, I: Iterator<Item = &'a BlockHash>>(
+        &self,
+        blocks: I,
+    ) -> Option<BTreeSet<ChainKey>>;
 
     // this should *not* mark keys as used
     // it would be a map but we split it each time anyway
@@ -73,15 +68,13 @@ pub trait BlockStore {
 
 pub trait BlockStoreExt: BlockStore {
     fn open_block(&mut self, pubkey: &sign::PublicKey, block: Block) -> Result<Vec<u8>, Error> {
-        if !block.check_sig(pubkey) {
-            return Err(BadSig);
-        }
-
         let keys = self
             .get_keys(block.parent_hashes.iter())
-            .ok_or(MissingKeys)?
-            .into_iter()
-            .collect();
+            .ok_or(MissingKeys)?;
+
+        if !sign::verify_detached(&block.sig, &compute_block_signing_data(&keys), pubkey) {
+            return Err(BadSig);
+        }
 
         let (chainkey, msgkey, nonce) = kdf(&keys, &block.sig).ok_or(KdfError)?;
         let ad = compute_block_ad(&block.parent_hashes, &block.sig);
@@ -97,7 +90,7 @@ pub trait BlockStoreExt: BlockStore {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
             hashkeys.into_iter().unzip();
 
-        let dat = compute_block_signing_data(&parent_hashes);
+        let dat = compute_block_signing_data(&keys);
         let sig = sign::sign_detached(&dat, seckey);
 
         let (c, k, n) = kdf(&keys, &sig).ok_or(KdfError)?;
@@ -123,11 +116,11 @@ pub trait BlockStoreExt: BlockStore {
 
 impl<T: BlockStore> BlockStoreExt for T {}
 
-fn compute_block_signing_data(parents: &BTreeSet<BlockHash>) -> Vec<u8> {
-    let capacity = parents.len() * BLOCKHASH_BYTES;
+fn compute_block_signing_data(keys: &BTreeSet<ChainKey>) -> Vec<u8> {
+    let capacity = keys.len() * CHAINKEY_BYTES;
     let mut data = Vec::with_capacity(capacity);
-    for parent in parents.iter() {
-        data.extend_from_slice(parent.as_ref())
+    for key in keys.iter() {
+        data.extend_from_slice(key.as_ref())
     }
     data
 }
