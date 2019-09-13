@@ -6,11 +6,21 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
-sodiumoxide = "0.2"
-serde = { version = "^1.0", default-features = false, features=["derive"], optional = true }
-serde_bytes = { version = "^0.11", optional = true }
+[dependencies.sodiumoxide]
+version = "0.2"
+default-features = false
+features = ["std"]
+
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+optional = true
+
+[dependencies.serde_bytes]
+version = "0.11"
+optional = true
 
 [features]
 default = ["serde_support"]
-serde_support = ["serde", "serde_bytes"]
+serde_support = ["serde", "serde_bytes", "sodiumoxide/serde"]
+use-pkg-config = ["sodiumoxide/use-pkg-config"]
