@@ -32,6 +32,7 @@ pub type Nonce = aead::Nonce;
 
 #[derive(Clone)]
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
+#[derive(Eq, PartialEq)]
 pub struct Block {
     parent_hashes: BTreeSet<BlockHash>,
     sig: sign::Signature,
@@ -54,6 +55,7 @@ impl Block {
 
 #[derive(Clone)]
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
+#[derive(Eq, PartialEq)]
 pub struct Genesis {
     root: ChainKey,
     sig: sign::Signature,
@@ -74,20 +76,31 @@ impl Genesis {
         let digest = state.finalize().ok()?;
         BlockHash::from_slice(digest.as_ref())
     }
+
+    pub fn verify_sig(&self, pk: &sign::PublicKey) -> bool {
+        sign::verify_detached(
+            &self.sig,
+            &compute_block_signing_data(std::iter::once(&self.root)),
+            pk,
+        )
+    }
 }
 
 pub trait BlockStore {
+    // stores a key, does not mark key as used
     fn store_key(&mut self, hash: BlockHash, key: ChainKey);
-    // we'll want to implement some kind of gc strategy to delete old, used keys
-    // maybe run it hourly, or more often if there's lots of activity
+    // we'll want to implement some kind of gc strategy to collect keys marked used
+    // if they're less than an hour old we should keep them, otherwise delete
+    // could run on a schedule, or every time we call get_unused, or something else
     fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I);
+
+    // this should *not* mark keys as used
     fn get_keys<'a, I: Iterator<Item = &'a BlockHash>>(
         &self,
         blocks: I,
     ) -> Option<BTreeSet<ChainKey>>;
 
     // this should *not* mark keys as used
-    // it would be a map but we split it each time anyway
     fn get_unused(&self) -> Vec<(BlockHash, ChainKey)>;
 }
 
@@ -111,9 +124,8 @@ pub trait BlockStoreExt: BlockStore {
     }
 
     fn seal_block(&mut self, seckey: &sign::SecretKey, msg: &[u8]) -> Result<Block, Error> {
-        let hashkeys = self.get_unused();
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
-            hashkeys.into_iter().unzip();
+            self.get_unused().into_iter().unzip();
         let (c, block) = seal_block(&seckey, keys.iter(), parent_hashes, msg)?;
 
         self.store_block_data(&block, c)?;
