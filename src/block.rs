@@ -30,9 +30,8 @@ pub type MessageKey = aead::Key;
 pub const NONCE_BYTES: usize = aead::NONCEBYTES;
 pub type Nonce = aead::Nonce;
 
-#[derive(Clone)]
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
-#[derive(Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
 pub struct Block {
     parent_hashes: BTreeSet<BlockHash>,
     sig: sign::Signature,
@@ -53,9 +52,8 @@ impl Block {
     }
 }
 
-#[derive(Clone)]
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
-#[derive(Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Genesis {
     root: ChainKey,
     sig: sign::Signature,
