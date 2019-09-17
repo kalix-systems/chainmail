@@ -62,8 +62,7 @@ pub struct Genesis {
 impl Genesis {
     pub fn new(seckey: &sign::SecretKey) -> Self {
         let root = gen_chainkey();
-        let sig_data = compute_block_signing_data(std::iter::once(&root));
-        let sig = sign::sign_detached(&sig_data, seckey);
+        let sig = sign::sign_detached(root.as_ref(), seckey);
         Genesis { root, sig }
     }
 
@@ -76,11 +75,7 @@ impl Genesis {
     }
 
     pub fn verify_sig(&self, pk: &sign::PublicKey) -> bool {
-        sign::verify_detached(
-            &self.sig,
-            &compute_block_signing_data(std::iter::once(&self.root)),
-            pk,
-        )
+        sign::verify_detached(&self.sig, self.root.as_ref(), pk)
     }
 }
 
@@ -108,7 +103,11 @@ pub trait BlockStoreExt: BlockStore {
             .get_keys(block.parent_hashes.iter())
             .ok_or(MissingKeys)?;
 
-        if !sign::verify_detached(&block.sig, &compute_block_signing_data(keys.iter()), pubkey) {
+        if !sign::verify_detached(
+            &block.sig,
+            &compute_block_signing_data(block.parent_hashes.iter()),
+            pubkey,
+        ) {
             return Err(BadSig);
         }
 
@@ -150,7 +149,7 @@ fn seal_block<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
     parent_hashes: BTreeSet<BlockHash>,
     msg: &[u8],
 ) -> Result<(ChainKey, Block), Error> {
-    let dat = compute_block_signing_data(parent_keys.clone());
+    let dat = compute_block_signing_data(parent_hashes.iter());
     let sig = sign::sign_detached(&dat, seckey);
 
     let (c, k, n) = kdf(parent_keys, &sig).ok_or(KdfError)?;
@@ -169,11 +168,11 @@ fn seal_block<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
 
 impl<T: BlockStore> BlockStoreExt for T {}
 
-fn compute_block_signing_data<'a, I: Iterator<Item = &'a ChainKey>>(keys: I) -> Vec<u8> {
-    let capacity = keys.size_hint().0 * CHAINKEY_BYTES;
+fn compute_block_signing_data<'a, I: Iterator<Item = &'a BlockHash>>(hashes: I) -> Vec<u8> {
+    let capacity = hashes.size_hint().0 * BLOCKHASH_BYTES;
     let mut data = Vec::with_capacity(capacity);
-    for key in keys {
-        data.extend_from_slice(key.as_ref())
+    for hash in hashes {
+        data.extend_from_slice(hash.as_ref())
     }
     data
 }
