@@ -81,11 +81,11 @@ impl Genesis {
 
 pub trait BlockStore {
     // stores a key, does not mark key as used
-    fn store_key(&mut self, hash: BlockHash, key: ChainKey);
+    fn store_key(&mut self, hash: BlockHash, key: ChainKey) -> Result<(), Error>;
     // we'll want to implement some kind of gc strategy to collect keys marked used
     // if they're less than an hour old we should keep them, otherwise delete
     // could run on a schedule, or every time we call get_unused, or something else
-    fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I);
+    fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I) -> Result<(), Error>;
 
     // this should *not* mark keys as used
     fn get_keys<'a, I: Iterator<Item = &'a BlockHash>>(
@@ -94,7 +94,7 @@ pub trait BlockStore {
     ) -> Option<BTreeSet<ChainKey>>;
 
     // this should *not* mark keys as used
-    fn get_unused(&self) -> Vec<(BlockHash, ChainKey)>;
+    fn get_unused(&self) -> Result<Vec<(BlockHash, ChainKey)>, Error>;
 }
 
 pub trait BlockStoreExt: BlockStore {
@@ -122,7 +122,7 @@ pub trait BlockStoreExt: BlockStore {
 
     fn seal_block(&mut self, seckey: &sign::SecretKey, msg: &[u8]) -> Result<Block, Error> {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
-            self.get_unused().into_iter().unzip();
+            self.get_unused()?.into_iter().unzip();
         let (c, block) = seal_block(&seckey, keys.iter(), parent_hashes, msg)?;
 
         self.store_block_data(&block, c)?;
@@ -131,14 +131,14 @@ pub trait BlockStoreExt: BlockStore {
 
     fn store_block_data(&mut self, block: &Block, key: ChainKey) -> Result<(), Error> {
         let hash = block.compute_hash().ok_or(HashingError)?;
-        self.store_key(hash, key);
-        self.mark_used(block.parent_hashes.iter());
+        self.store_key(hash, key)?;
+        self.mark_used(block.parent_hashes.iter())?;
         Ok(())
     }
 
     fn store_genesis(&mut self, gen: Genesis) -> Result<(), Error> {
         let hash = gen.compute_hash().ok_or(HashingError)?;
-        self.store_key(hash, gen.root);
+        self.store_key(hash, gen.root)?;
         Ok(())
     }
 }

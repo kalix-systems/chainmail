@@ -7,6 +7,8 @@ pub enum Error {
     DecryptionError,
     HashingError,
     BadSig,
+    BlockStoreSaveError,
+    BlockStoreMarkError,
 }
 
 use Error::*;
@@ -19,6 +21,8 @@ impl fmt::Display for Error {
             DecryptionError => write!(fmt, "Failed to decrypt a block"),
             HashingError => write!(fmt, "Failed to hash block"),
             BadSig => write!(fmt, "Signature did not sign data"),
+            BlockStoreSaveError => write!(fmt, "BlockStore couldn't save key"),
+            BlockStoreMarkError => write!(fmt, "BlockStore couldn't mark key as unused"),
         }
     }
 }
