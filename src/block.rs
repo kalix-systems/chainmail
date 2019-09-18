@@ -80,24 +80,28 @@ impl Genesis {
 }
 
 pub trait BlockStore {
-    // stores a key, does not mark key as used
+    /// Stores a new unused key.
     fn store_key(&mut self, hash: BlockHash, key: ChainKey);
-    // we'll want to implement some kind of gc strategy to collect keys marked used
-    // if they're less than an hour old we should keep them, otherwise delete
-    // could run on a schedule, or every time we call get_unused, or something else
+
+    /// Marks all keys in `blocks` as used. Fails if any of them are not found.
+    /// Keys marked used should eventually be deleted, with enough margin for error that out of
+    /// order message delivery between online clients will not cause issues.
     fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I);
 
-    // this should *not* mark keys as used
+    /// Gets all keys in `blocks`, even if they are marked as used. Does not mark them as used.
+    /// Fails if any of the keys are not found.
     fn get_keys<'a, I: Iterator<Item = &'a BlockHash>>(
         &self,
         blocks: I,
     ) -> Option<BTreeSet<ChainKey>>;
 
-    // this should *not* mark keys as used
+    /// Gets all keys not marked used, does not mark them as used.
     fn get_unused(&self) -> Vec<(BlockHash, ChainKey)>;
 }
 
 pub trait BlockStoreExt: BlockStore {
+    /// Checks that `block` is signed by `pubkey`, and returns the decrypted plaintext,
+    /// marking all keys referenced by `block` as used.
     fn open_block(&mut self, pubkey: &sign::PublicKey, block: Block) -> Result<Vec<u8>, Error> {
         let keys = self
             .get_keys(block.parent_hashes.iter())
@@ -111,7 +115,7 @@ pub trait BlockStoreExt: BlockStore {
             return Err(BadSig);
         }
 
-        let (chainkey, msgkey, nonce) = kdf(keys.iter(), &block.sig).ok_or(KdfError)?;
+        let (chainkey, msgkey, nonce) = kdf(keys.iter(), &block.sig).ok_or(CryptoError)?;
         let ad = compute_block_ad(&block.parent_hashes, &block.sig);
         let res =
             aead::open(&block.msg, Some(&ad), &nonce, &msgkey).map_err(|_| DecryptionError)?;
@@ -120,6 +124,8 @@ pub trait BlockStoreExt: BlockStore {
         Ok(res)
     }
 
+    /// Signs `msg` with `seckey`, encrypting it with a symmetric key derived by the results of
+    /// `self.get_unused()` and marking all of said keys as used.
     fn seal_block(&mut self, seckey: &sign::SecretKey, msg: &[u8]) -> Result<Block, Error> {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
             self.get_unused().into_iter().unzip();
@@ -130,14 +136,14 @@ pub trait BlockStoreExt: BlockStore {
     }
 
     fn store_block_data(&mut self, block: &Block, key: ChainKey) -> Result<(), Error> {
-        let hash = block.compute_hash().ok_or(HashingError)?;
+        let hash = block.compute_hash().ok_or(CryptoError)?;
         self.store_key(hash, key);
         self.mark_used(block.parent_hashes.iter());
         Ok(())
     }
 
     fn store_genesis(&mut self, gen: Genesis) -> Result<(), Error> {
-        let hash = gen.compute_hash().ok_or(HashingError)?;
+        let hash = gen.compute_hash().ok_or(CryptoError)?;
         self.store_key(hash, gen.root);
         Ok(())
     }
@@ -152,7 +158,7 @@ fn seal_block<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
     let dat = compute_block_signing_data(parent_hashes.iter());
     let sig = sign::sign_detached(&dat, seckey);
 
-    let (c, k, n) = kdf(parent_keys, &sig).ok_or(KdfError)?;
+    let (c, k, n) = kdf(parent_keys, &sig).ok_or(CryptoError)?;
     let ad = compute_block_ad(&parent_hashes, &sig);
     let msg = aead::seal(msg, Some(&ad), &n, &k);
 
