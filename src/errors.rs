@@ -8,6 +8,7 @@ pub enum Error {
     MissingKeys,
     BlockStoreUnavailable,
     RedundantMark,
+    BlockStoreCorrupted,
 }
 
 use Error::*;
@@ -20,6 +21,7 @@ impl fmt::Display for Error {
             BadSig => write!(fmt, "Signature did not sign data"),
             MissingKeys => write!(fmt, "BlockStore couldn't find keys"),
             BlockStoreUnavailable => write!(fmt, "BlockStore is unavailable"),
+            BlockStoreCorrupted => write!(fmt, "BlockStore is possibly corrupted"),
             RedundantMark => write!(
                 fmt,
                 "Tried to mark key as used that was already marked as used."
