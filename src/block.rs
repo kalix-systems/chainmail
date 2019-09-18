@@ -80,13 +80,13 @@ impl Genesis {
 }
 
 pub trait BlockStore {
-    /// Stores a new unused key.
-    fn store_key(&mut self, hash: BlockHash, key: ChainKey);
+    /// stores a new unused key.
+    fn store_key(&mut self, hash: BlockHash, key: ChainKey) -> Result<(), Error>;
 
     /// Marks all keys in `blocks` as used. Fails if any of them are not found.
     /// Keys marked used should eventually be deleted, with enough margin for error that out of
     /// order message delivery between online clients will not cause issues.
-    fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I);
+    fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I) -> Result<(), Error>;
 
     /// Gets all keys in `blocks`, even if they are marked as used. Does not mark them as used.
     /// Fails if any of the keys are not found.
@@ -96,7 +96,7 @@ pub trait BlockStore {
     ) -> Option<BTreeSet<ChainKey>>;
 
     /// Gets all keys not marked used, does not mark them as used.
-    fn get_unused(&self) -> Vec<(BlockHash, ChainKey)>;
+    fn get_unused(&self) -> Result<Vec<(BlockHash, ChainKey)>, Error>;
 }
 
 pub trait BlockStoreExt: BlockStore {
@@ -128,7 +128,7 @@ pub trait BlockStoreExt: BlockStore {
     /// `self.get_unused()` and marking all of said keys as used.
     fn seal_block(&mut self, seckey: &sign::SecretKey, msg: &[u8]) -> Result<Block, Error> {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
-            self.get_unused().into_iter().unzip();
+            self.get_unused()?.into_iter().unzip();
         let (c, block) = seal_block(&seckey, keys.iter(), parent_hashes, msg)?;
 
         self.store_block_data(&block, c)?;
@@ -137,14 +137,14 @@ pub trait BlockStoreExt: BlockStore {
 
     fn store_block_data(&mut self, block: &Block, key: ChainKey) -> Result<(), Error> {
         let hash = block.compute_hash().ok_or(CryptoError)?;
-        self.store_key(hash, key);
-        self.mark_used(block.parent_hashes.iter());
+        self.store_key(hash, key)?;
+        self.mark_used(block.parent_hashes.iter())?;
         Ok(())
     }
 
     fn store_genesis(&mut self, gen: Genesis) -> Result<(), Error> {
         let hash = gen.compute_hash().ok_or(CryptoError)?;
-        self.store_key(hash, gen.root);
+        self.store_key(hash, gen.root)?;
         Ok(())
     }
 }
