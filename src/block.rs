@@ -86,7 +86,7 @@ pub trait BlockStore {
     /// Marks all keys in `blocks` as used. Fails if any of them are not found.
     /// Keys marked used should eventually be deleted, with enough margin for error that out of
     /// order message delivery between online clients will not cause issues.
-    fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&self, blocks: I) -> Result<(), Error>;
+    fn mark_used<'a, I: Iterator<Item = &'a BlockHash>>(&mut self, blocks: I) -> Result<(), Error>;
 
     /// Gets all keys in `blocks`, even if they are marked as used. Does not mark them as used.
     /// Fails if any of the keys are not found.
