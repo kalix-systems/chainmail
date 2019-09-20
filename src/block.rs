@@ -32,15 +32,15 @@ pub type Nonce = aead::Nonce;
 
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
-pub struct Block<'a> {
+pub struct Block {
     parent_hashes: BTreeSet<BlockHash>,
     sig: sign::Signature,
     tag: aead::Tag,
     #[cfg_attr(feature = "serde_support", serde(with = "serde_bytes"))]
-    msg: &'a [u8],
+    msg: Vec<u8>,
 }
 
-impl<'a> Block<'a> {
+impl Block {
     pub fn compute_hash(&self) -> Option<BlockHash> {
         let mut state = hash::State::new(BLOCKHASH_BYTES, None).ok()?;
         for parent in self.parent_hashes.iter() {
@@ -103,7 +103,7 @@ pub trait BlockStore {
 pub trait BlockStoreExt: BlockStore {
     /// Checks that `block` is signed by `pubkey`, and returns the decrypted plaintext,
     /// marking all keys referenced by `block` as used.
-    fn open_block(&mut self, pubkey: &sign::PublicKey, block: Block) -> Result<Vec<u8>, Error> {
+    fn open_block(&mut self, pubkey: &sign::PublicKey, mut block: Block) -> Result<Vec<u8>, Error> {
         let keys = self
             .get_keys(block.parent_hashes.iter())
             .ok_or(MissingKeys)?;
@@ -118,21 +118,16 @@ pub trait BlockStoreExt: BlockStore {
 
         let (chainkey, msgkey, nonce) = kdf(keys.iter(), &block.sig).ok_or(CryptoError)?;
         let ad = compute_block_ad(&block.parent_hashes, &block.sig);
-        let mut out = Vec::from(block.msg);
-        aead::open_detached(&mut out, Some(&ad), &block.tag, &nonce, &msgkey)
+        aead::open_detached(&mut block.msg, Some(&ad), &block.tag, &nonce, &msgkey)
             .map_err(|_| DecryptionError)?;
 
         self.store_block_data(&block, chainkey)?;
-        Ok(out)
+        Ok(block.msg)
     }
 
     /// Signs `msg` with `seckey`, encrypting it with a symmetric key derived by the results of
     /// `self.get_unused()` and marking all of said keys as used.
-    fn seal_block<'a>(
-        &mut self,
-        seckey: &sign::SecretKey,
-        msg: &'a mut [u8],
-    ) -> Result<Block<'a>, Error> {
+    fn seal_block<'a>(&mut self, seckey: &sign::SecretKey, msg: Vec<u8>) -> Result<Block, Error> {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
             self.get_unused()?.into_iter().unzip();
         let (c, block) = seal_block(&seckey, keys.iter(), parent_hashes, msg)?;
@@ -155,18 +150,18 @@ pub trait BlockStoreExt: BlockStore {
     }
 }
 
-fn seal_block<'a, 'b, I: Iterator<Item = &'a ChainKey> + Clone>(
+fn seal_block<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
     seckey: &sign::SecretKey,
     parent_keys: I,
     parent_hashes: BTreeSet<BlockHash>,
-    msg: &'b mut [u8],
-) -> Result<(ChainKey, Block<'b>), Error> {
+    mut msg: Vec<u8>,
+) -> Result<(ChainKey, Block), Error> {
     let dat = compute_block_signing_data(parent_hashes.iter());
     let sig = sign::sign_detached(&dat, seckey);
 
     let (c, k, n) = kdf(parent_keys, &sig).ok_or(CryptoError)?;
     let ad = compute_block_ad(&parent_hashes, &sig);
-    let tag = aead::seal_detached(msg, Some(&ad), &n, &k);
+    let tag = aead::seal_detached(&mut msg, Some(&ad), &n, &k);
 
     Ok((
         c,
