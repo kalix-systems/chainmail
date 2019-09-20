@@ -32,14 +32,15 @@ pub type Nonce = aead::Nonce;
 
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
-pub struct Block {
+pub struct Block<'a> {
     parent_hashes: BTreeSet<BlockHash>,
     sig: sign::Signature,
+    tag: aead::Tag,
     #[cfg_attr(feature = "serde_support", serde(with = "serde_bytes"))]
-    msg: Vec<u8>,
+    msg: &'a [u8],
 }
 
-impl Block {
+impl<'a> Block<'a> {
     pub fn compute_hash(&self) -> Option<BlockHash> {
         let mut state = hash::State::new(BLOCKHASH_BYTES, None).ok()?;
         for parent in self.parent_hashes.iter() {
@@ -117,16 +118,21 @@ pub trait BlockStoreExt: BlockStore {
 
         let (chainkey, msgkey, nonce) = kdf(keys.iter(), &block.sig).ok_or(CryptoError)?;
         let ad = compute_block_ad(&block.parent_hashes, &block.sig);
-        let res =
-            aead::open(&block.msg, Some(&ad), &nonce, &msgkey).map_err(|_| DecryptionError)?;
+        let mut out = Vec::from(block.msg);
+        aead::open_detached(&mut out, Some(&ad), &block.tag, &nonce, &msgkey)
+            .map_err(|_| DecryptionError)?;
 
         self.store_block_data(&block, chainkey)?;
-        Ok(res)
+        Ok(out)
     }
 
     /// Signs `msg` with `seckey`, encrypting it with a symmetric key derived by the results of
     /// `self.get_unused()` and marking all of said keys as used.
-    fn seal_block(&mut self, seckey: &sign::SecretKey, msg: &[u8]) -> Result<Block, Error> {
+    fn seal_block<'a>(
+        &mut self,
+        seckey: &sign::SecretKey,
+        msg: &'a mut [u8],
+    ) -> Result<Block<'a>, Error> {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
             self.get_unused()?.into_iter().unzip();
         let (c, block) = seal_block(&seckey, keys.iter(), parent_hashes, msg)?;
@@ -149,24 +155,25 @@ pub trait BlockStoreExt: BlockStore {
     }
 }
 
-fn seal_block<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
+fn seal_block<'a, 'b, I: Iterator<Item = &'a ChainKey> + Clone>(
     seckey: &sign::SecretKey,
     parent_keys: I,
     parent_hashes: BTreeSet<BlockHash>,
-    msg: &[u8],
-) -> Result<(ChainKey, Block), Error> {
+    msg: &'b mut [u8],
+) -> Result<(ChainKey, Block<'b>), Error> {
     let dat = compute_block_signing_data(parent_hashes.iter());
     let sig = sign::sign_detached(&dat, seckey);
 
     let (c, k, n) = kdf(parent_keys, &sig).ok_or(CryptoError)?;
     let ad = compute_block_ad(&parent_hashes, &sig);
-    let msg = aead::seal(msg, Some(&ad), &n, &k);
+    let tag = aead::seal_detached(msg, Some(&ad), &n, &k);
 
     Ok((
         c,
         Block {
             parent_hashes,
             sig,
+            tag,
             msg,
         },
     ))
