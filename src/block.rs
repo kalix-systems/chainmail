@@ -47,7 +47,7 @@ impl Block {
             state.update(parent.as_ref()).ok()?;
         }
         state.update(self.sig.as_ref()).ok()?;
-        state.update(&self.msg).ok()?;
+        // we specifically don't include the message content in the hash for deniability purposes
         let digest = state.finalize().ok()?;
         BlockHash::from_slice(digest.as_ref())
     }
