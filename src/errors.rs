@@ -1,7 +1,7 @@
 use std::{error, fmt};
 
 #[derive(Eq, PartialEq, Debug)]
-pub enum Error {
+pub enum ChainError {
     CryptoError,
     DecryptionError,
     BadSig,
@@ -11,9 +11,9 @@ pub enum Error {
     BlockStoreCorrupted,
 }
 
-use Error::*;
+use ChainError::*;
 
-impl fmt::Display for Error {
+impl fmt::Display for ChainError {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             CryptoError => write!(fmt, "libsodium failed"),
@@ -30,4 +30,4 @@ impl fmt::Display for Error {
     }
 }
 
-impl error::Error for Error {}
+impl error::Error for ChainError {}

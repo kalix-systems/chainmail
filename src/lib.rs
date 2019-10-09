@@ -12,5 +12,5 @@ mod prelude {
         aead::xchacha20poly1305_ietf as aead, generichash as hash, sign,
     };
 
-    pub use crate::errors::{Error::*, *};
+    pub use crate::errors::{ChainError::*, *};
 }
