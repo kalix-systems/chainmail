@@ -54,7 +54,7 @@ impl Block {
 }
 
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
 pub struct Genesis {
     root: ChainKey,
     sig: sign::Signature,
