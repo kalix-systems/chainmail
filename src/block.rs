@@ -83,7 +83,7 @@ impl Genesis {
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
 pub enum DecryptionResult {
     Success(Vec<u8>, Vec<Block>),
-    Pending,
+    Pending(Vec<BlockHash>),
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
@@ -151,8 +151,8 @@ pub trait BlockStoreExt: BlockStore {
                 Ok(DecryptionResult::Success(block.msg, unlocked))
             }
             FoundKeys::Missing(missing) => {
-                self.add_pending(block, missing)?;
-                Ok(DecryptionResult::Pending)
+                self.add_pending(block, missing.clone())?;
+                Ok(DecryptionResult::Pending(missing))
             }
         }
     }
