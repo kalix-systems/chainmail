@@ -81,9 +81,9 @@ impl Genesis {
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
-pub enum DecryptionResult {
-    Success(Vec<u8>, Vec<Block>),
-    Pending(Vec<BlockHash>),
+pub enum DecryptionResult<S: BlockStore + ?Sized> {
+    Success(Vec<u8>, Vec<(Block, S::Signer)>),
+    Pending,
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
@@ -94,10 +94,15 @@ pub enum FoundKeys {
 
 pub trait BlockStore {
     type Error: From<ChainError>;
+    type Signer: AsRef<sign::PublicKey>;
 
     /// Stores `key` with index `hash`, removes `hash` from pending lists, and returns list of
     /// `Block`s that are now ready to be decrypted.
-    fn store_key(&mut self, hash: BlockHash, key: ChainKey) -> Result<Vec<Block>, Self::Error>;
+    fn store_key(
+        &mut self,
+        hash: BlockHash,
+        key: ChainKey,
+    ) -> Result<Vec<(Block, Self::Signer)>, Self::Error>;
 
     /// Marks all keys in `blocks` as used. Fails if any of them are not found.
     /// Keys marked used should eventually be deleted, with enough margin for error that out of
@@ -118,7 +123,12 @@ pub trait BlockStore {
     // procedure for detecting garbled messages?
     /// Adds `block` to the store marked pending, makes sure hashes it depends on don't get
     /// collected.
-    fn add_pending(&self, block: Block, awaiting: Vec<BlockHash>) -> Result<(), Self::Error>;
+    fn add_pending(
+        &self,
+        signer: &Self::Signer,
+        block: Block,
+        awaiting: Vec<BlockHash>,
+    ) -> Result<(), Self::Error>;
 
     /// Gets all keys not marked used, does not mark them as used.
     fn get_unused(&self) -> Result<Vec<(BlockHash, ChainKey)>, Self::Error>;
@@ -129,15 +139,15 @@ pub trait BlockStoreExt: BlockStore {
     /// marking all keys referenced by `block` as used.
     fn open_block(
         &mut self,
-        pubkey: &sign::PublicKey,
+        signer: &Self::Signer,
         mut block: Block,
-    ) -> Result<DecryptionResult, Self::Error> {
+    ) -> Result<DecryptionResult<Self>, Self::Error> {
         match self.get_keys(block.parent_hashes.iter())? {
             FoundKeys::Found(keys) => {
                 if !sign::verify_detached(
                     &block.sig,
                     &compute_block_signing_data(block.parent_hashes.iter()),
-                    pubkey,
+                    signer.as_ref(),
                 ) {
                     return Err(BadSig.into());
                 }
@@ -151,8 +161,8 @@ pub trait BlockStoreExt: BlockStore {
                 Ok(DecryptionResult::Success(block.msg, unlocked))
             }
             FoundKeys::Missing(missing) => {
-                self.add_pending(block, missing.clone())?;
-                Ok(DecryptionResult::Pending(missing))
+                self.add_pending(signer, block, missing)?;
+                Ok(DecryptionResult::Pending)
             }
         }
     }
@@ -184,7 +194,7 @@ pub trait BlockStoreExt: BlockStore {
         &mut self,
         block: &Block,
         key: ChainKey,
-    ) -> Result<Vec<Block>, Self::Error> {
+    ) -> Result<Vec<(Block, Self::Signer)>, Self::Error> {
         let hash = block.compute_hash().ok_or(CryptoError)?;
         let unlocked = self.store_key(hash, key)?;
         self.mark_used(block.parent_hashes.iter())?;
@@ -197,6 +207,8 @@ pub trait BlockStoreExt: BlockStore {
         Ok(())
     }
 }
+
+impl<T: BlockStore> BlockStoreExt for T {}
 
 fn seal_block<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
     seckey: &sign::SecretKey,
@@ -221,8 +233,6 @@ fn seal_block<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
         },
     ))
 }
-
-impl<T: BlockStore> BlockStoreExt for T {}
 
 fn compute_block_signing_data<'a, I: Iterator<Item = &'a BlockHash>>(hashes: I) -> Vec<u8> {
     let capacity = hashes.size_hint().0 * BLOCKHASH_BYTES;
