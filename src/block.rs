@@ -41,7 +41,6 @@ pub struct Block {
 }
 
 impl Block {
-    // this function really should never fail, but who knows, maybe libsodium will screw up
     pub fn compute_hash(&self) -> Option<BlockHash> {
         let mut state = hash::State::new(BLOCKHASH_BYTES, None).ok()?;
         for parent in self.parent_hashes.iter() {
@@ -174,13 +173,21 @@ pub trait BlockStoreExt: BlockStore {
         &mut self,
         seckey: &sign::SecretKey,
         msg: Vec<u8>,
-    ) -> Result<(Block, BlockHash, ChainKey), Self::Error> {
+    ) -> Result<Block, Self::Error> {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
             self.get_unused()?.into_iter().unzip();
         let (c, block) = seal_block(&seckey, keys.iter(), parent_hashes, msg)?;
-        let hash = block.compute_hash().ok_or(CryptoError)?;
 
-        Ok((block, hash, c))
+        // NOTE: this should never unlock blocks.
+        // If it does, one of the following three things has happened:
+        // 1) Time travel
+        // 2) Broken cryptography
+        // 3) Something has gone horribly horribly wrong
+        // In any of these cases, I think it's acceptable to panic.
+        let unlocked = self.store_block_data(&block, c)?;
+        assert!(unlocked.is_empty());
+
+        Ok(block)
     }
 
     fn store_block_data(
