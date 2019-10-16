@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use sodiumoxide::randombytes::randombytes_into;
 use std::collections::BTreeSet;
 
 pub const BLOCKHASH_BYTES: usize = 32;
@@ -10,6 +11,15 @@ pub const CHAINKEY_BYTES: usize = hash::DIGEST_MAX;
 new_type! {
     /// A key which is used for kdf purposes
     secret ChainKey(CHAINKEY_BYTES);
+}
+
+impl ChainKey {
+    fn new() -> Self {
+        sodiumoxide::init().expect("failed to initialize libsodium");
+        let mut buf = [0u8; CHAINKEY_BYTES];
+        randombytes_into(&mut buf);
+        ChainKey(buf)
+    }
 }
 
 impl PartialOrd for ChainKey {
@@ -30,10 +40,26 @@ pub type MessageKey = aead::Key;
 pub const NONCE_BYTES: usize = aead::NONCEBYTES;
 pub type Nonce = aead::Nonce;
 
+pub const SALT_BYTES: usize = 32;
+new_type! {
+    /// A salt included with blocks, used for hashing
+    nonce Salt(SALT_BYTES);
+}
+
+impl Salt {
+    fn new() -> Salt {
+        sodiumoxide::init().expect("failed to initialize libsodium");
+        let mut buf = [0u8; SALT_BYTES];
+        randombytes_into(&mut buf);
+        Salt(buf)
+    }
+}
+
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone)]
 pub struct Block {
     parent_hashes: BTreeSet<BlockHash>,
+    salt: Salt,
     sig: sign::Signature,
     tag: aead::Tag,
     #[cfg_attr(feature = "serde_support", serde(with = "serde_bytes"))]
@@ -46,10 +72,36 @@ impl Block {
         for parent in self.parent_hashes.iter() {
             state.update(parent.as_ref()).ok()?;
         }
+        state.update(self.salt.as_ref()).ok()?;
         state.update(self.sig.as_ref()).ok()?;
         // we specifically don't include the message content in the hash for deniability purposes
         let digest = state.finalize().ok()?;
         BlockHash::from_slice(digest.as_ref())
+    }
+
+    pub fn seal(
+        seckey: &sign::SecretKey,
+        parent_keys: BTreeSet<ChainKey>,
+        parent_hashes: BTreeSet<BlockHash>,
+        mut msg: Vec<u8>,
+    ) -> Option<(Block, ChainKey)> {
+        let salt = Salt::new();
+        let dat = compute_block_signing_data(&parent_hashes, salt);
+        let sig = sign::sign_detached(&dat, seckey);
+        let (c, k, n) = kdf(&parent_keys, salt, sig)?;
+        let ad = compute_block_ad(&parent_hashes, salt, sig);
+        let tag = aead::seal_detached(&mut msg, Some(&ad), &n, &k);
+
+        Some((
+            Block {
+                parent_hashes,
+                salt,
+                sig,
+                tag,
+                msg,
+            },
+            c,
+        ))
     }
 }
 
@@ -62,7 +114,7 @@ pub struct Genesis {
 
 impl Genesis {
     pub fn new(seckey: &sign::SecretKey) -> Self {
-        let root = gen_chainkey();
+        let root = ChainKey::new();
         let sig = sign::sign_detached(root.as_ref(), seckey);
         Genesis { root, sig }
     }
@@ -146,14 +198,17 @@ pub trait BlockStoreExt: BlockStore {
             FoundKeys::Found(keys) => {
                 if !sign::verify_detached(
                     &block.sig,
-                    &compute_block_signing_data(block.parent_hashes.iter()),
+                    &compute_block_signing_data(&block.parent_hashes, block.salt),
                     signer.as_ref(),
                 ) {
                     return Err(BadSig.into());
                 }
 
-                let (chainkey, msgkey, nonce) = kdf(keys.iter(), &block.sig).ok_or(CryptoError)?;
-                let ad = compute_block_ad(&block.parent_hashes, &block.sig);
+                let (chainkey, msgkey, nonce) =
+                    kdf(&keys, block.salt, block.sig).ok_or(CryptoError)?;
+
+                let ad = compute_block_ad(&block.parent_hashes, block.salt, block.sig);
+
                 aead::open_detached(&mut block.msg, Some(&ad), &block.tag, &nonce, &msgkey)
                     .map_err(|_| DecryptionError)?;
 
@@ -176,7 +231,7 @@ pub trait BlockStoreExt: BlockStore {
     ) -> Result<Block, Self::Error> {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
             self.get_unused()?.into_iter().unzip();
-        let (c, block) = seal_block(&seckey, keys.iter(), parent_hashes, msg)?;
+        let (block, c) = Block::seal(&seckey, keys, parent_hashes, msg).ok_or(CryptoError)?;
 
         // NOTE: this should never unlock blocks.
         // If it does, one of the following three things has happened:
@@ -210,55 +265,34 @@ pub trait BlockStoreExt: BlockStore {
 
 impl<T: BlockStore> BlockStoreExt for T {}
 
-fn seal_block<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
-    seckey: &sign::SecretKey,
-    parent_keys: I,
-    parent_hashes: BTreeSet<BlockHash>,
-    mut msg: Vec<u8>,
-) -> Result<(ChainKey, Block), ChainError> {
-    let dat = compute_block_signing_data(parent_hashes.iter());
-    let sig = sign::sign_detached(&dat, seckey);
-
-    let (c, k, n) = kdf(parent_keys, &sig).ok_or(CryptoError)?;
-    let ad = compute_block_ad(&parent_hashes, &sig);
-    let tag = aead::seal_detached(&mut msg, Some(&ad), &n, &k);
-
-    Ok((
-        c,
-        Block {
-            parent_hashes,
-            sig,
-            tag,
-            msg,
-        },
-    ))
-}
-
-fn compute_block_signing_data<'a, I: Iterator<Item = &'a BlockHash>>(hashes: I) -> Vec<u8> {
-    let capacity = hashes.size_hint().0 * BLOCKHASH_BYTES;
+fn compute_block_signing_data(hashes: &BTreeSet<BlockHash>, salt: Salt) -> Vec<u8> {
+    let capacity = hashes.len() * BLOCKHASH_BYTES + SALT_BYTES;
     let mut data = Vec::with_capacity(capacity);
     for hash in hashes {
-        data.extend_from_slice(hash.as_ref())
+        data.extend_from_slice(hash.as_ref());
     }
+    data.extend_from_slice(salt.as_ref());
     data
 }
 
-fn compute_block_ad(parents: &BTreeSet<BlockHash>, sig: &sign::Signature) -> Vec<u8> {
-    let capacity = parents.len() * BLOCKHASH_BYTES + sign::SIGNATUREBYTES;
+fn compute_block_ad(parents: &BTreeSet<BlockHash>, salt: Salt, sig: sign::Signature) -> Vec<u8> {
+    let capacity = parents.len() * BLOCKHASH_BYTES + SALT_BYTES + sign::SIGNATUREBYTES;
     let mut ad = Vec::with_capacity(capacity);
     for parent in parents.iter() {
         ad.extend_from_slice(parent.as_ref());
     }
+    ad.extend_from_slice(salt.as_ref());
     ad.extend_from_slice(sig.as_ref());
     ad
 }
 
-fn hash_inputs_with_salt<'a, I, D, S>(len: usize, data: I, salt: &S) -> Result<hash::Digest, ()>
-where
-    I: Iterator<Item = &'a D>,
-    D: AsRef<[u8]> + 'a,
-    S: AsRef<[u8]>,
-{
+fn hash_keys_with_salt_and_index(
+    len: usize,
+    data: &BTreeSet<ChainKey>,
+    salt: Salt,
+    sig: sign::Signature,
+    idx: u8,
+) -> Option<hash::Digest> {
     debug_assert!(
         hash::DIGEST_MIN <= len && len <= hash::DIGEST_MAX,
         "BAD DIGEST LENGTH\nExpected: length between {} and {}\nCalled with {}",
@@ -266,48 +300,28 @@ where
         hash::DIGEST_MAX,
         len
     );
-    let mut state = hash::State::new(len, None)?;
-    for d in data {
-        state.update(d.as_ref())?;
+    let mut state = hash::State::new(len, None).ok()?;
+    for d in data.iter() {
+        state.update(d.as_ref()).ok()?;
     }
-    state.update(salt.as_ref())?;
-    state.finalize()
+    state.update(salt.as_ref()).ok()?;
+    state.update(sig.as_ref()).ok()?;
+    state.update(&[idx]).ok()?;
+    state.finalize().ok()
 }
 
-fn kdf<'a, I: Iterator<Item = &'a ChainKey> + Clone>(
-    keys: I,
-    sig: &sign::Signature,
+fn kdf(
+    keys: &BTreeSet<ChainKey>,
+    salt: Salt,
+    sig: sign::Signature,
 ) -> Option<(ChainKey, MessageKey, Nonce)> {
-    let mut salt = Vec::with_capacity(sign::SIGNATUREBYTES + 1);
-    salt.extend_from_slice(sig.as_ref());
+    let chainkey_bytes = hash_keys_with_salt_and_index(CHAINKEY_BYTES, keys, salt, sig, 0)?;
+    let msgkey_bytes = hash_keys_with_salt_and_index(MESSAGEKEY_BYTES, keys, salt, sig, 0)?;
+    let nonce_bytes = hash_keys_with_salt_and_index(NONCE_BYTES, keys, salt, sig, 0)?;
 
-    let chainkey_bytes = {
-        salt.push(0);
-        let res = hash_inputs_with_salt(CHAINKEY_BYTES, keys.clone(), &salt).ok()?;
-        salt.pop();
-        res
-    };
-    let msgkey_bytes = {
-        salt.push(1);
-        let res = hash_inputs_with_salt(MESSAGEKEY_BYTES, keys.clone(), &salt).ok()?;
-        salt.pop();
-        res
-    };
-    let nonce_bytes = {
-        salt.push(2);
-        let res = hash_inputs_with_salt(NONCE_BYTES, keys, &salt).ok()?;
-        salt.pop();
-        res
-    };
     let chainkey = ChainKey::from_slice(chainkey_bytes.as_ref())?;
     let msgkey = MessageKey::from_slice(msgkey_bytes.as_ref())?;
     let nonce = Nonce::from_slice(nonce_bytes.as_ref())?;
-    Some((chainkey, msgkey, nonce))
-}
 
-fn gen_chainkey() -> ChainKey {
-    sodiumoxide::init().expect("failed to initialize libsodium");
-    let mut buf = [0u8; CHAINKEY_BYTES];
-    sodiumoxide::randombytes::randombytes_into(&mut buf);
-    ChainKey(buf)
+    Some((chainkey, msgkey, nonce))
 }
