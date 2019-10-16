@@ -1,6 +1,6 @@
 use std::{error, fmt};
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Clone, Copy, Debug)]
 pub enum ChainError {
     CryptoError,
     DecryptionError,
