@@ -164,6 +164,10 @@ impl Genesis {
         BlockHash::from_slice(digest.as_ref())
     }
 
+    pub fn key(&self) -> &ChainKey {
+        &self.root
+    }
+
     pub fn verify_sig(&self, pk: &sign::PublicKey) -> bool {
         sign::verify_detached(&self.sig, self.root.as_ref(), pk)
     }
