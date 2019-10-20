@@ -78,6 +78,10 @@ pub struct SealData {
 }
 
 impl Block {
+    pub fn parent_hashes(&self) -> &BTreeSet<BlockHash> {
+        &self.parent_hashes
+    }
+
     pub fn compute_hash(&self) -> Option<BlockHash> {
         let mut state = hash::State::new(BLOCKHASH_BYTES, None).ok()?;
         for parent in self.parent_hashes.iter() {
