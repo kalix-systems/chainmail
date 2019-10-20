@@ -66,6 +66,12 @@ pub struct Block {
     msg: Vec<u8>,
 }
 
+pub struct OpenData {
+    pub msg: Vec<u8>,
+    pub hash: BlockHash,
+    pub key: ChainKey,
+}
+
 impl Block {
     pub fn compute_hash(&self) -> Option<BlockHash> {
         let mut state = hash::State::new(BLOCKHASH_BYTES, None).ok()?;
@@ -102,6 +108,32 @@ impl Block {
             },
             c,
         ))
+    }
+
+    pub fn open(
+        self,
+        signer: &sign::PublicKey,
+        parent_keys: BTreeSet<ChainKey>,
+    ) -> Result<OpenData, ChainError> {
+        let hash = self.compute_hash().ok_or(CryptoError)?;
+
+        let Block {
+            parent_hashes,
+            salt,
+            sig,
+            tag,
+            mut msg,
+        } = self;
+
+        let dat = compute_block_signing_data(&parent_hashes, salt);
+        if sign::verify_detached(&sig, &dat, signer) {
+            let (c, k, n) = kdf(&parent_keys, salt, sig).ok_or(CryptoError)?;
+            let ad = compute_block_ad(&parent_hashes, salt, sig);
+            aead::open_detached(&mut msg, Some(&ad), &tag, &n, &k).map_err(|_| DecryptionError)?;
+            Ok(OpenData { msg, hash, key: c })
+        } else {
+            Err(BadSig)
+        }
     }
 }
 
