@@ -72,6 +72,11 @@ pub struct OpenData {
     pub key: ChainKey,
 }
 
+pub struct SealData {
+    pub block: Block,
+    pub key: ChainKey,
+}
+
 impl Block {
     pub fn compute_hash(&self) -> Option<BlockHash> {
         let mut state = hash::State::new(BLOCKHASH_BYTES, None).ok()?;
@@ -90,7 +95,7 @@ impl Block {
         parent_keys: BTreeSet<ChainKey>,
         parent_hashes: BTreeSet<BlockHash>,
         mut msg: Vec<u8>,
-    ) -> Option<(Block, ChainKey)> {
+    ) -> Option<SealData> {
         let salt = Salt::new();
         let dat = compute_block_signing_data(&parent_hashes, salt);
         let sig = sign::sign_detached(&dat, seckey);
@@ -98,16 +103,16 @@ impl Block {
         let ad = compute_block_ad(&parent_hashes, salt, sig);
         let tag = aead::seal_detached(&mut msg, Some(&ad), &n, &k);
 
-        Some((
-            Block {
+        Some(SealData {
+            block: Block {
                 parent_hashes,
                 salt,
                 sig,
                 tag,
                 msg,
             },
-            c,
-        ))
+            key: c,
+        })
     }
 
     pub fn open(
@@ -263,7 +268,8 @@ pub trait BlockStoreExt: BlockStore {
     ) -> Result<Block, Self::Error> {
         let (parent_hashes, keys): (BTreeSet<BlockHash>, BTreeSet<ChainKey>) =
             self.get_unused()?.into_iter().unzip();
-        let (block, c) = Block::seal(&seckey, keys, parent_hashes, msg).ok_or(CryptoError)?;
+        let SealData { block, key } =
+            Block::seal(&seckey, keys, parent_hashes, msg).ok_or(CryptoError)?;
 
         // NOTE: this should never unlock blocks.
         // If it does, one of the following three things has happened:
@@ -271,7 +277,7 @@ pub trait BlockStoreExt: BlockStore {
         // 2) Broken cryptography
         // 3) Something has gone horribly horribly wrong
         // In any of these cases, I think it's acceptable to panic.
-        let unlocked = self.store_block_data(&block, c)?;
+        let unlocked = self.store_block_data(&block, key)?;
         assert!(unlocked.is_empty());
 
         Ok(block)
