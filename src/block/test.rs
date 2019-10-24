@@ -16,27 +16,30 @@ fn seal_unseal() {
 
         let g1hash = g1.compute_hash().expect("failed to compute genesis hash");
         let g2hash = g2.compute_hash().expect("failed to compute genesis hash");
-        let g1key = g1.key().clone();
-        let g2key = g2.key().clone();
+
+        let channel_key = g1.channel_key().clone();
+
+        let g1root = g1.root().clone();
+        let g2root = g2.root().clone();
 
         let m = vec![0u8; 100];
         let mut m_keyset = BTreeSet::new();
-        m_keyset.insert(g1key);
-        m_keyset.insert(g2key);
+        m_keyset.insert(g1root);
+        m_keyset.insert(g2root);
 
         let mut m_hashset = BTreeSet::new();
         m_hashset.insert(g2hash);
         m_hashset.insert(g1hash);
 
-        let m_sealed =
-            Block::seal(&sk, &m_keyset, m_hashset.clone(), m.clone()).expect("failed to seal msg");
+        let m_sealed = Block::seal(&sk, &channel_key, &m_keyset, m_hashset.clone(), m.clone())
+            .expect("failed to seal msg");
         let m_hash = m_sealed
             .block
             .compute_hash()
             .expect("failed to compute msg hash");
 
-        let m_unsealed =
-            Block::open(m_sealed.block.clone(), &pk, &m_keyset).expect("failed to unseal msg");
+        let m_unsealed = Block::open(m_sealed.block.clone(), &channel_key, &pk, &m_keyset)
+            .expect("failed to unseal msg");
 
         assert_eq!(m_unsealed.msg, m);
         assert_eq!(m_unsealed.hash, m_hash);

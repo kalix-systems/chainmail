@@ -3,7 +3,8 @@ use sodiumoxide::randombytes::randombytes_into;
 use std::collections::BTreeSet;
 
 pub const BLOCKHASH_BYTES: usize = 32;
-new_type! { /// The hash of a `Block`
+new_type! {
+    /// The hash of a `Block`
     public BlockHash(BLOCKHASH_BYTES);
 }
 
@@ -48,10 +49,24 @@ new_type! {
 
 impl Salt {
     fn new() -> Salt {
-        sodiumoxide::init().expect("failed to initialize libsodium");
         let mut buf = [0u8; SALT_BYTES];
         randombytes_into(&mut buf);
         Salt(buf)
+    }
+}
+
+pub const CHANNELKEY_BYTES: usize = 64;
+new_type! {
+    /// A base shared secret that is mixed into each new block
+    secret ChannelKey(CHANNELKEY_BYTES);
+}
+
+impl ChannelKey {
+    fn new() -> ChannelKey {
+        sodiumoxide::init().expect("failed to initialize libsodium");
+        let mut buf = [0u8; CHANNELKEY_BYTES];
+        randombytes_into(&mut buf);
+        ChannelKey(buf)
     }
 }
 
@@ -96,6 +111,7 @@ impl Block {
 
     pub fn seal(
         seckey: &sign::SecretKey,
+        channel_key: &ChannelKey,
         parent_keys: &BTreeSet<ChainKey>,
         parent_hashes: BTreeSet<BlockHash>,
         mut msg: Vec<u8>,
@@ -103,7 +119,7 @@ impl Block {
         let salt = Salt::new();
         let dat = compute_block_signing_data(&parent_hashes, salt);
         let sig = sign::sign_detached(&dat, seckey);
-        let (c, k, n) = kdf(&parent_keys, salt, sig)?;
+        let (c, k, n) = kdf(&channel_key, &parent_keys, salt, sig)?;
         let ad = compute_block_ad(&parent_hashes, salt, sig);
         let tag = aead::seal_detached(&mut msg, Some(&ad), &n, &k);
 
@@ -121,6 +137,7 @@ impl Block {
 
     pub fn open(
         self,
+        channel_key: &ChannelKey,
         signer: &sign::PublicKey,
         parent_keys: &BTreeSet<ChainKey>,
     ) -> Result<OpenData, ChainError> {
@@ -136,7 +153,7 @@ impl Block {
 
         let dat = compute_block_signing_data(&parent_hashes, salt);
         if sign::verify_detached(&sig, &dat, signer) {
-            let (c, k, n) = kdf(&parent_keys, salt, sig).ok_or(CryptoError)?;
+            let (c, k, n) = kdf(&channel_key, &parent_keys, salt, sig).ok_or(CryptoError)?;
             let ad = compute_block_ad(&parent_hashes, salt, sig);
             aead::open_detached(&mut msg, Some(&ad), &tag, &n, &k).map_err(|_| DecryptionError)?;
             Ok(OpenData { msg, hash, key: c })
@@ -147,33 +164,65 @@ impl Block {
 }
 
 #[cfg_attr(feature = "serde_support", derive(Serialize, Deserialize))]
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Genesis {
+    channel_key: ChannelKey,
     root: ChainKey,
     sig: sign::Signature,
 }
 
 impl Genesis {
     pub fn new(seckey: &sign::SecretKey) -> Self {
+        let channel_key = ChannelKey::new();
         let root = ChainKey::new();
-        let sig = sign::sign_detached(root.as_ref(), seckey);
-        Genesis { root, sig }
+        let dat = Self::compute_signing_data(&channel_key, &root);
+        let sig = sign::sign_detached(&dat, seckey);
+        Genesis {
+            channel_key,
+            root,
+            sig,
+        }
+    }
+
+    fn compute_signing_data(
+        channel_key: &ChannelKey,
+        root: &ChainKey,
+    ) -> [u8; CHANNELKEY_BYTES + CHAINKEY_BYTES] {
+        let mut buf = [0u8; CHANNELKEY_BYTES + CHAINKEY_BYTES];
+        for (b, o) in channel_key
+            .as_ref()
+            .iter()
+            .chain(root.as_ref())
+            .zip(buf.iter_mut())
+        {
+            *o = *b;
+        }
+        buf
     }
 
     pub fn compute_hash(&self) -> Option<BlockHash> {
         let mut state = hash::State::new(BLOCKHASH_BYTES, None).ok()?;
+        state.update(self.channel_key.as_ref()).ok()?;
         state.update(self.root.as_ref()).ok()?;
         state.update(self.sig.as_ref()).ok()?;
         let digest = state.finalize().ok()?;
         BlockHash::from_slice(digest.as_ref())
     }
 
-    pub fn key(&self) -> &ChainKey {
+    pub fn channel_key(&self) -> &ChannelKey {
+        &self.channel_key
+    }
+
+    pub fn root(&self) -> &ChainKey {
         &self.root
     }
 
     pub fn verify_sig(&self, pk: &sign::PublicKey) -> bool {
-        sign::verify_detached(&self.sig, self.root.as_ref(), pk)
+        sign::verify_detached(
+            &self.sig,
+            &Self::compute_signing_data(&self.channel_key, &self.root),
+            pk,
+        )
     }
 }
 
@@ -200,6 +249,7 @@ fn compute_block_ad(parents: &BTreeSet<BlockHash>, salt: Salt, sig: sign::Signat
 
 fn hash_keys_with_salt_and_index(
     len: usize,
+    chan_key: &ChannelKey,
     data: &BTreeSet<ChainKey>,
     salt: Salt,
     sig: sign::Signature,
@@ -213,6 +263,7 @@ fn hash_keys_with_salt_and_index(
         len
     );
     let mut state = hash::State::new(len, None).ok()?;
+    state.update(chan_key.as_ref()).ok()?;
     for d in data.iter() {
         state.update(d.as_ref()).ok()?;
     }
@@ -223,13 +274,16 @@ fn hash_keys_with_salt_and_index(
 }
 
 fn kdf(
+    chan_key: &ChannelKey,
     keys: &BTreeSet<ChainKey>,
     salt: Salt,
     sig: sign::Signature,
 ) -> Option<(ChainKey, MessageKey, Nonce)> {
-    let chainkey_bytes = hash_keys_with_salt_and_index(CHAINKEY_BYTES, keys, salt, sig, 0)?;
-    let msgkey_bytes = hash_keys_with_salt_and_index(MESSAGEKEY_BYTES, keys, salt, sig, 0)?;
-    let nonce_bytes = hash_keys_with_salt_and_index(NONCE_BYTES, keys, salt, sig, 0)?;
+    let chainkey_bytes =
+        hash_keys_with_salt_and_index(CHAINKEY_BYTES, chan_key, keys, salt, sig, 0)?;
+    let msgkey_bytes =
+        hash_keys_with_salt_and_index(MESSAGEKEY_BYTES, chan_key, keys, salt, sig, 0)?;
+    let nonce_bytes = hash_keys_with_salt_and_index(NONCE_BYTES, chan_key, keys, salt, sig, 0)?;
 
     let chainkey = ChainKey::from_slice(chainkey_bytes.as_ref())?;
     let msgkey = MessageKey::from_slice(msgkey_bytes.as_ref())?;
